@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -59,15 +62,19 @@ func main() {
 	)
 	flag.Parse()
 	argv := flag.Args()
+
+	role := ""
+	var args []string
 	if len(argv) < 1 {
-		flag.Usage()
-		os.Exit(1)
+		role = autoDetectAccount()
+		// flag.Usage()
+		// os.Exit(1)
+	} else {
+		role = argv[0]
+		args = argv[1:]
 	}
 
 	stscreds.DefaultDuration = *duration
-
-	role := argv[0]
-	args := argv[1:]
 
 	// Load credentials from configFilePath if it exists, else use regular AWS config
 	var creds *credentials.Value
@@ -87,6 +94,10 @@ func main() {
 		}
 
 		creds, err = assumeRole(roleConfig.Role, roleConfig.MFA, *duration)
+
+		if err != nil {
+			must(fmt.Errorf("ERROR assuming the role %s", err))
+		}
 	} else {
 		creds, err = assumeProfile(role)
 	}
@@ -254,4 +265,142 @@ func must(err error) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func autoDetectAccount() string {
+	basePath := "/Users"
+	fileName := "common.tfvars"
+	currentPath, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	targetPath := currentPath
+
+	foundPath := foundCommonVarsFile(basePath, targetPath, fileName)
+	account := ""
+	if foundPath != "" {
+		account = findAccountIdInCommonVars(foundPath, fileName)
+	} else {
+		panic("Not AWS account found in common.tfvars")
+	}
+
+	return findProfileInAWSConfig(account, currentPath)
+}
+
+func foundCommonVarsFile(basePath string, targetPath string, fileName string) string {
+	foundPath := ""
+	for {
+		rel, _ := filepath.Rel(basePath, targetPath)
+
+		// Exit the loop once we reach the basePath.
+		if rel == "." {
+			break
+		}
+
+		filepath.WalkDir(targetPath, func(path string, info fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && info.Name() == fileName {
+				foundPath = targetPath
+				return nil
+			}
+			return nil
+		})
+
+		if foundPath != "" {
+			break
+		}
+		// Going up!
+		targetPath += "/.."
+	}
+
+	return foundPath
+}
+
+func findAccountIdInCommonVars(targetPath string, fileName string) string {
+	account := ""
+	dat, err := ioutil.ReadFile(fmt.Sprintf("%v/%v", targetPath, fileName))
+	if err != nil {
+		panic(err)
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(dat)))
+
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "account") {
+			account = strings.Split(scanner.Text(), "\"")[1]
+		}
+	}
+	return account
+}
+
+func findProfileInAWSConfig(account string, currentPath string) string {
+
+	splittedPath := strings.Split(currentPath, "/")
+	awsConfigPath := "/" + splittedPath[1] + "/" + splittedPath[2] + "/.aws"
+	awsConfigFileName := "config"
+
+	dat, err := ioutil.ReadFile(fmt.Sprintf("%v/%v", awsConfigPath, awsConfigFileName))
+	if err != nil {
+		panic(err)
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(dat)))
+
+	var profilesLinesFound []int
+	line := 1
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), account) {
+			if strings.Contains(scanner.Text(), "role_arn") {
+				profilesLinesFound = append(profilesLinesFound, line-1)
+			}
+		}
+		line++
+	}
+
+	scanner2 := bufio.NewScanner(strings.NewReader(string(dat)))
+	line = 1
+	var profilesFound []string
+	for scanner2.Scan() {
+		if intInSlice(line, profilesLinesFound) {
+			splittedProfile := strings.Split(scanner2.Text(), " ")
+			profilesFound = append(profilesFound, splittedProfile[1][:len(splittedProfile[1])-1])
+		}
+		line++
+	}
+	fmt.Printf("\nprofilesFound = %v", profilesFound)
+
+	if len(profilesFound) > 1 {
+		// DO SOMETHING
+		return confirmProfile(profilesFound)
+	} else {
+		return profilesFound[0]
+	}
+
+}
+
+func intInSlice(a int, list []int) bool {
+	for _, b := range list {
+		if b == a {
+			return true
+		}
+	}
+	return false
+}
+
+func confirmProfile(foundProfiles []string) string {
+	fmt.Printf("I have found more than one profile available for this account, please choose one:")
+	for i, profile := range foundProfiles {
+		fmt.Printf("\n(%d) %s", i, profile)
+	}
+	fmt.Print("\nOr empty to abort\n")
+	var option string
+
+	// Taking input from user
+	fmt.Scanln(&option)
+	selectedOption, err := strconv.Atoi(option)
+	if err != nil {
+		panic(err)
+	}
+
+	return foundProfiles[selectedOption]
 }
