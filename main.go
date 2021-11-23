@@ -327,8 +327,9 @@ func findAccountIdInCommonVars(targetPath string, fileName string) string {
 	scanner := bufio.NewScanner(strings.NewReader(string(dat)))
 
 	for scanner.Scan() {
-		if strings.Contains(scanner.Text(), "account") {
+		if strings.Contains(scanner.Text(), "ParAccountId") || strings.Contains(scanner.Text(), "account_id") {
 			account = strings.Split(scanner.Text(), "\"")[1]
+			break
 		}
 	}
 	return account
